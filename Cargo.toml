@@ -1,0 +1,27 @@
+[package]
+name = "swc-condition-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "SWC plugin to transform Condition JSX elements into conditional expressions"
+license = "MIT"
+repository = "https://github.com/winchesHe/swc-condition-plugin"
+keywords = ["swc", "plugin", "jsx", "condition", "transform"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+swc_core = { version = "0.90", features = ["ecma_plugin_transform"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+swc_core = { version = "0.90", features = ["ecma_plugin_transform", "testing_transform", "__parser", "ecma_codegen"] }
+
+[profile.release]
+# This removes more dead code
+codegen-units = 1
+lto = true
+# Optimize for size
+opt-level = "s"
+# Strip debug info
+strip = true
