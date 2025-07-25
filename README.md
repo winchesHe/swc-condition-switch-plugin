@@ -172,8 +172,8 @@ const element = Boolean(condition) ? <>
 ### Building the Plugin
 
 ```bash
-# Install Rust and wasm32-wasi target
-rustup target add wasm32-wasi
+# Install Rust and wasm32-wasip1 target
+rustup target add wasm32-wasip1
 
 # Build the plugin
 ./build.sh
