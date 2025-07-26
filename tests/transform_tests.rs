@@ -426,6 +426,11 @@ fn test_transform(input: &str, expected: &str) {
             .replace("item => ", "item => ")
             .replace("=> <", "=>  <")
             .replace("alt=\"Avatar\"/>", "alt=\"Avatar\" />")
+            .replace("<Switch/>", "<Switch />")
+            .replace("</> : null}{", "</> : null} {")
+            .replace("<React.Fragment>{", "<React.Fragment> {")
+            .replace("}</React.Fragment>", "} </React.Fragment>")
+            .replace("</p> <p>", "</p><p>")
     };
     
     assert_eq!(
@@ -435,4 +440,236 @@ fn test_transform(input: &str, expected: &str) {
         cleaned_output,
         expected
     );
+}
+
+#[test]
+fn test_switch_non_short_circuit_multiple_cases() {
+    let input = r#"
+    function App({ condition1, condition2 }) {
+      return (
+        <Switch>
+          <Switch.Case if={condition1}>
+            <p>Case 1</p>
+            <p>Case 2</p>
+          </Switch.Case>
+          <Switch.Case if={condition2}>
+            <p>Case 2</p>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition1, condition2 }) {
+      return (
+        <React.Fragment>
+          {condition1 ? <><p>Case 1</p><p>Case 2</p></> : null}
+          {condition2 ? <><p>Case 2</p></> : null}
+        </React.Fragment>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_short_circuit_simple() {
+    let input = r#"
+    function App({ condition1, condition2 }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={condition1}>
+            <p>Case 1</p>
+          </Switch.Case>
+          <Switch.Case if={condition2}>
+            <p>Case 2</p>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition1, condition2 }) {
+      return condition1 ? <p>Case 1</p> : condition2 ? <p>Case 2</p> : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_short_circuit_complex() {
+    let input = r#"
+    function App({ items }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={items.length > 0}>
+            <ul>
+              {items.map(item => <li key={item.id}>{item.name}</li>)}
+            </ul>
+          </Switch.Case>
+          <Switch.Case if={items.length === 0}>
+            <p>No items found</p>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ items }) {
+      return items.length > 0 ? (
+        <ul>
+          {items.map((item)=><li key={item.id}>{item.name}</li>)}
+        </ul>
+      ) : items.length === 0 ? <p>No items found</p> : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_short_circuit_multiple_conditions() {
+    let input = r#"
+    function App({ priority, user, guest }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={priority === 'high'}>
+            <div className="high-priority">High Priority</div>
+          </Switch.Case>
+          <Switch.Case if={user}>
+            <div className="user">User Content</div>
+          </Switch.Case>
+          <Switch.Case if={guest}>
+            <div className="guest">Guest Content</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ priority, user, guest }) {
+      return priority === 'high' ? <div className="high-priority">High Priority</div> : user ? <div className="user">User Content</div> : guest ? <div className="guest">Guest Content</div> : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_normal_content_no_transform() {
+    let input = r#"
+    function App() {
+      return (
+        <Switch>
+          <p>This is normal Switch content</p>
+          <span>Another element</span>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App() {
+      return (
+        <Switch>
+          <p>This is normal Switch content</p>
+          <span>Another element</span>
+        </Switch>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_empty_no_transform() {
+    let input = r#"
+    function App() {
+      return <Switch />
+    }
+    "#;
+
+    let expected = r#"
+    function App() {
+      return <Switch />
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_return_context() {
+    let input = r#"
+    function App({ location }) {
+      return (
+        <Switch>
+          <Switch.Case if={location}>
+            <div>case 1</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ location }) {
+      return location ? <div>case 1</div> : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_assignment_context() {
+    let input = r#"
+    function App({ condition }) {
+      const element = <Switch shortCircuit>
+        <Switch.Case if={condition}>
+          <span>Assignment context</span>
+        </Switch.Case>
+      </Switch>
+      return element
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition }) {
+      const element = condition ? <span>Assignment context</span> : null
+      return element
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_assignment_context_with_map() {
+    let input = r#"
+    function App({ condition }) {
+      const element = <Switch>
+        <Switch.Case if={condition}>
+          {items.map(item => <li key={item.id}>{item.name}</li>)}
+        </Switch.Case>
+      </Switch>
+      return element
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition }) {
+      const element = condition ? <>{items.map((item)=><li key={item.id}>{item.name}</li>)}</> : null
+      return element
+    }
+    "#;
+
+    test_transform(input, expected);
 }
