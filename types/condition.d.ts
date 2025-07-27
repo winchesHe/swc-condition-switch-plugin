@@ -4,6 +4,17 @@ declare namespace JSX {
       if: any;
       children?: React.ReactNode;
     };
+    Switch: {
+      shortCircuit?: boolean;
+      children?: React.ReactNode;
+    };
+  }
+}
+
+declare namespace Switch {
+  interface Case {
+    if: any;
+    children?: React.ReactNode;
   }
 }
 
