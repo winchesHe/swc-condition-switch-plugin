@@ -3,9 +3,10 @@ use swc_core::ecma::{
     visit::{Fold, FoldWith},
 };
 use swc_core::common::SyntaxContext;
+use swc_core::atoms::Atom;
 use swc_core::plugin::{plugin_transform, proxies::TransformPluginProgramMetadata};
 use serde::Deserialize;
-use std::sync::Arc;
+// removed Arc usage after switching to by-value caching of frequently used nodes
 
 static CONDITION_TAG: &str = "Condition";
 static SWITCH_TAG: &str = "Switch";
@@ -29,11 +30,20 @@ enum WrapperType {
 
 pub struct TransformVisitor {
     current_context: WrapperType,
-    null_expr: Arc<Expr>,
-    boolean_ident: Arc<Ident>,
-    react_fragment_ident: Arc<Ident>,
-    condition_placeholder_ident: Arc<Ident>,
+    // Cache frequently used small nodes directly; `Arc` adds atomic ref-counting overhead that
+    // isn’t required because the visitor lives on a single thread. Storing the values by
+    // value keeps them in the same cache line and makes `clone()` just a cheap `Copy` of a
+    // few bytes instead of an atomic ref-count update.
+    null_expr: Expr,
+    boolean_ident: Ident,
+    react_fragment_ident: Ident,
+    condition_placeholder_ident: Ident,
     syntax_context: SyntaxContext,
+    // Pre-computed atoms for fast string comparison
+    condition_atom: Atom,
+    switch_atom: Atom,
+    if_atom: Atom,
+    short_circuit_atom: Atom,
 }
 
 impl Default for TransformVisitor {
@@ -42,11 +52,15 @@ impl Default for TransformVisitor {
         let syntax_context = SyntaxContext::empty();
         Self {
             current_context: WrapperType::Jsx,
-            null_expr: Arc::new(Expr::Lit(Lit::Null(Null { span }))),
-            boolean_ident: Arc::new(Ident::new(BOOLEAN_FUNC.into(), span, syntax_context)),
-            react_fragment_ident: Arc::new(Ident::new(REACT_FRAGMENT.into(), span, syntax_context)),
-            condition_placeholder_ident: Arc::new(Ident::new(CONDITION_PLACEHOLDER.into(), span, syntax_context)),
+            null_expr: Expr::Lit(Lit::Null(Null { span })),
+            boolean_ident: Ident::new(BOOLEAN_FUNC.into(), span, syntax_context),
+            react_fragment_ident: Ident::new(REACT_FRAGMENT.into(), span, syntax_context),
+            condition_placeholder_ident: Ident::new(CONDITION_PLACEHOLDER.into(), span, syntax_context),
             syntax_context,
+            condition_atom: CONDITION_TAG.into(),
+            switch_atom: SWITCH_TAG.into(),
+            if_atom: IF_ATTR.into(),
+            short_circuit_atom: SHORT_CIRCUIT_ATTR.into(),
         }
     }
 }
@@ -54,12 +68,11 @@ impl Default for TransformVisitor {
 impl Fold for TransformVisitor {
     fn fold_jsx_element(&mut self, element: JSXElement) -> JSXElement {
         if let JSXElementName::Ident(ident) = &element.opening.name {
-            let tag_name = ident.sym.as_ref();
-            if tag_name == CONDITION_TAG {
+            if ident.sym == self.condition_atom {
                 if let Some(condition_expr) = self.extract_condition_from_attrs(&element.opening.attrs) {
                     return self.create_conditional_jsx(condition_expr, element.children, element.span);
                 }
-            } else if tag_name == SWITCH_TAG {
+            } else if ident.sym == self.switch_atom {
                 if self.has_switch_case_children(&element.children) {
                     let short_circuit = self.extract_short_circuit_attr(&element.opening.attrs);
                     return self.create_switch_transformation(element.children, short_circuit, element.span);
@@ -75,24 +88,10 @@ impl Fold for TransformVisitor {
     fn fold_jsx_element_child(&mut self, child: JSXElementChild) -> JSXElementChild {
         match child {
             JSXElementChild::JSXElement(element) => {
-                if self.current_context != WrapperType::Jsx {
-                    let prev_context = std::mem::replace(&mut self.current_context, WrapperType::Jsx);
-                    let result = JSXElementChild::JSXElement(Box::new(self.fold_jsx_element(*element)));
-                    self.current_context = prev_context;
-                    result
-                } else {
-                    JSXElementChild::JSXElement(Box::new(self.fold_jsx_element(*element)))
-                }
+                JSXElementChild::JSXElement(Box::new(self.with_jsx_context(|visitor| visitor.fold_jsx_element(*element))))
             }
             JSXElementChild::JSXFragment(fragment) => {
-                if self.current_context != WrapperType::Jsx {
-                    let prev_context = std::mem::replace(&mut self.current_context, WrapperType::Jsx);
-                    let result = JSXElementChild::JSXFragment(self.fold_jsx_fragment(fragment));
-                    self.current_context = prev_context;
-                    result
-                } else {
-                    JSXElementChild::JSXFragment(self.fold_jsx_fragment(fragment))
-                }
+                JSXElementChild::JSXFragment(self.with_jsx_context(|visitor| visitor.fold_jsx_fragment(fragment)))
             }
             JSXElementChild::JSXExprContainer(container) => {
                 JSXElementChild::JSXExprContainer(self.fold_jsx_expr_container(container))
@@ -107,13 +106,7 @@ impl Fold for TransformVisitor {
     }
 
     fn fold_jsx_expr_container(&mut self, mut container: JSXExprContainer) -> JSXExprContainer {
-        if self.current_context != WrapperType::Jsx {
-            let prev_context = std::mem::replace(&mut self.current_context, WrapperType::Jsx);
-            container.expr = container.expr.fold_with(self);
-            self.current_context = prev_context;
-        } else {
-            container.expr = container.expr.fold_with(self);
-        }
+        container.expr = self.with_jsx_context(|visitor| container.expr.fold_with(visitor));
         container
     }
 
@@ -160,10 +153,10 @@ impl Fold for TransformVisitor {
 
 impl TransformVisitor {
     fn extract_condition_from_attrs(&self, attrs: &[JSXAttrOrSpread]) -> Option<Box<Expr>> {
-        attrs.iter().find_map(|attr| {
+        for attr in attrs {
             if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
                 if let JSXAttrName::Ident(name) = &jsx_attr.name {
-                    if name.sym.as_ref() == IF_ATTR {
+                    if name.sym == self.if_atom {
                         if let Some(JSXAttrValue::JSXExprContainer(expr_container)) = &jsx_attr.value {
                             if let JSXExpr::Expr(condition_expr) = &expr_container.expr {
                                 return Some(condition_expr.clone());
@@ -172,8 +165,8 @@ impl TransformVisitor {
                     }
                 }
             }
-            None
-        })
+        }
+        None
     }
 
     fn get_current_context(&self) -> &WrapperType {
@@ -195,7 +188,7 @@ impl TransformVisitor {
             WrapperType::Assignment | WrapperType::Jsx => {
                 Expr::Call(CallExpr {
                     span,
-                    callee: Callee::Expr(Box::new(Expr::Ident((*self.boolean_ident).clone()))),
+                    callee: Callee::Expr(Box::new(Expr::Ident(self.boolean_ident.clone()))),
                     args: vec![ExprOrSpread {
                         spread: None,
                         expr: condition,
@@ -210,7 +203,7 @@ impl TransformVisitor {
             span,
             test: Box::new(test_expr),
             cons: Box::new(Expr::JSXFragment(fragment)),
-            alt: Box::new((*self.null_expr).clone()),
+            alt: Box::new(self.null_expr.clone()),
         });
 
         match current_context {
@@ -219,7 +212,7 @@ impl TransformVisitor {
                     span,
                     opening: JSXOpeningElement {
                         span,
-                        name: JSXElementName::Ident((*self.react_fragment_ident).clone()),
+                        name: JSXElementName::Ident(self.react_fragment_ident.clone()),
                         attrs: vec![],
                         self_closing: false,
                         type_args: None,
@@ -230,7 +223,7 @@ impl TransformVisitor {
                     })],
                     closing: Some(JSXClosingElement {
                         span,
-                        name: JSXElementName::Ident((*self.react_fragment_ident).clone()),
+                        name: JSXElementName::Ident(self.react_fragment_ident.clone()),
                     }),
                 }
             }
@@ -239,7 +232,7 @@ impl TransformVisitor {
                     span,
                     opening: JSXOpeningElement {
                         span,
-                        name: JSXElementName::Ident((*self.condition_placeholder_ident).clone()),
+                        name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
                         attrs: vec![],
                         self_closing: false,
                         type_args: None,
@@ -250,7 +243,7 @@ impl TransformVisitor {
                     })],
                     closing: Some(JSXClosingElement {
                         span,
-                        name: JSXElementName::Ident((*self.condition_placeholder_ident).clone()),
+                        name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
                     }),
                 }
             }
@@ -264,22 +257,44 @@ impl TransformVisitor {
                     if obj.sym.as_ref() == "Switch" && member.prop.sym.as_ref() == "Case"))
     }
 
+    #[inline]
     fn has_switch_case_children(&self, children: &[JSXElementChild]) -> bool {
-        children.iter().any(|child| {
-            if let JSXElementChild::JSXElement(element) = child {
-                self.is_switch_case_element(element)
-            } else {
-                false
-            }
-        })
+        children.iter().any(|child| matches!(child, JSXElementChild::JSXElement(elem) if self.is_switch_case_element(elem)))
     }
 
     fn extract_short_circuit_attr(&self, attrs: &[JSXAttrOrSpread]) -> bool {
         attrs.iter().any(|attr| {
             matches!(attr, JSXAttrOrSpread::JSXAttr(jsx_attr) 
                 if matches!(&jsx_attr.name, JSXAttrName::Ident(name) 
-                    if name.sym.as_ref() == SHORT_CIRCUIT_ATTR))
+                    if name.sym == self.short_circuit_atom))
         })
+    }
+
+    #[inline]
+    fn is_non_whitespace_child(child: &JSXElementChild) -> bool {
+        match child {
+            JSXElementChild::JSXText(text) => !text.value.trim().is_empty(),
+            _ => true,
+        }
+    }
+
+    fn filter_non_whitespace_children(children: Vec<JSXElementChild>) -> Vec<JSXElementChild> {
+        children.into_iter()
+            .filter(Self::is_non_whitespace_child)
+            .collect()
+    }
+
+    #[inline]
+    fn with_jsx_context<T, F>(&mut self, f: F) -> T 
+    where F: FnOnce(&mut Self) -> T {
+        if self.current_context == WrapperType::Jsx {
+            f(self)
+        } else {
+            let prev_context = std::mem::replace(&mut self.current_context, WrapperType::Jsx);
+            let result = f(self);
+            self.current_context = prev_context;
+            result
+        }
     }
 
     fn create_switch_transformation(&self, children: Vec<JSXElementChild>, short_circuit: bool, span: swc_core::common::Span) -> JSXElement {
@@ -326,7 +341,7 @@ impl TransformVisitor {
     }
 
     fn create_short_circuit_switch(&self, switch_cases: Vec<(Box<Expr>, Vec<JSXElementChild>)>, span: swc_core::common::Span) -> JSXElement {
-        let mut result_expr = Box::new((*self.null_expr).clone());
+        let mut result_expr = Box::new(self.null_expr.clone());
         let current_context = self.get_current_context();
         
         for (condition, children) in switch_cases.into_iter().rev() {
@@ -335,7 +350,7 @@ impl TransformVisitor {
                 WrapperType::Jsx => {
                     Expr::Call(CallExpr {
                         span,
-                        callee: Callee::Expr(Box::new(Expr::Ident((*self.boolean_ident).clone()))),
+                        callee: Callee::Expr(Box::new(Expr::Ident(self.boolean_ident.clone()))),
                         args: vec![ExprOrSpread {
                             spread: None,
                             expr: condition,
@@ -346,14 +361,7 @@ impl TransformVisitor {
                 }
             };
 
-            let non_whitespace_children: Vec<_> = children.into_iter()
-                .filter(|child| {
-                    match child {
-                        JSXElementChild::JSXText(text) => !text.value.trim().is_empty(),
-                        _ => true,
-                    }
-                })
-                .collect();
+            let non_whitespace_children = Self::filter_non_whitespace_children(children);
 
             let fragment_expr = if non_whitespace_children.len() == 1 {
                 let first_child = non_whitespace_children.into_iter().next().unwrap();
@@ -392,7 +400,7 @@ impl TransformVisitor {
                     span,
                     opening: JSXOpeningElement {
                         span,
-                        name: JSXElementName::Ident((*self.condition_placeholder_ident).clone()),
+                        name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
                         attrs: vec![],
                         self_closing: false,
                         type_args: None,
@@ -403,7 +411,7 @@ impl TransformVisitor {
                     })],
                     closing: Some(JSXClosingElement {
                         span,
-                        name: JSXElementName::Ident((*self.condition_placeholder_ident).clone()),
+                        name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
                     }),
                 }
             }
@@ -412,7 +420,7 @@ impl TransformVisitor {
                     span,
                     opening: JSXOpeningElement {
                         span,
-                        name: JSXElementName::Ident((*self.react_fragment_ident).clone()),
+                        name: JSXElementName::Ident(self.react_fragment_ident.clone()),
                         attrs: vec![],
                         self_closing: false,
                         type_args: None,
@@ -423,7 +431,7 @@ impl TransformVisitor {
                     })],
                     closing: Some(JSXClosingElement {
                         span,
-                        name: JSXElementName::Ident((*self.react_fragment_ident).clone()),
+                        name: JSXElementName::Ident(self.react_fragment_ident.clone()),
                     }),
                 }
             }
@@ -431,7 +439,8 @@ impl TransformVisitor {
     }
 
     fn create_parallel_switch(&self, switch_cases: Vec<(Box<Expr>, Vec<JSXElementChild>)>, span: swc_core::common::Span) -> JSXElement {
-        let mut result_children = vec![];
+        // 预先分配，避免 push 时多次扩容
+        let mut result_children = Vec::with_capacity(switch_cases.len());
 
         for (condition, children) in switch_cases {
             let fragment = JSXFragment {
@@ -445,7 +454,7 @@ impl TransformVisitor {
                 span,
                 test: condition,
                 cons: Box::new(Expr::JSXFragment(fragment)),
-                alt: Box::new((*self.null_expr).clone()),
+                alt: Box::new(self.null_expr.clone()),
             });
 
             result_children.push(JSXElementChild::JSXExprContainer(JSXExprContainer {
@@ -479,18 +488,16 @@ impl PostTransformVisitor {
         match expr {
             Expr::Cond(mut cond_expr) => {
                 if let Expr::JSXFragment(fragment) = &*cond_expr.cons {
-                    let non_whitespace_children: Vec<_> = fragment.children.iter()
-                        .filter(|child| {
-                            match child {
-                                JSXElementChild::JSXText(text) => !text.value.trim().is_empty(),
-                                _ => true,
-                            }
-                        })
-                        .collect();
+                    let non_whitespace_count = fragment.children.iter()
+                        .filter(|child| TransformVisitor::is_non_whitespace_child(child))
+                        .count();
                     
-                    if non_whitespace_children.len() == 1 {
-                        if let Some(JSXElementChild::JSXElement(element)) = non_whitespace_children.first() {
-                            cond_expr.cons = Box::new(Expr::JSXElement((*element).clone()));
+                    if non_whitespace_count == 1 {
+                        if let Some(child) = fragment.children.iter()
+                            .find(|child| TransformVisitor::is_non_whitespace_child(child)) {
+                            if let JSXElementChild::JSXElement(element) = child {
+                                cond_expr.cons = Box::new(Expr::JSXElement((*element).clone()));
+                            }
                         }
                     }
                 }
@@ -510,15 +517,19 @@ impl Fold for PostTransformVisitor {
             Expr::JSXElement(element) => {
                 if let JSXElementName::Ident(ident) = &element.opening.name {
                     if ident.sym.as_ref() == CONDITION_PLACEHOLDER {
-                        if let Some(JSXElementChild::JSXExprContainer(container)) = element.children.first() {
-                            if let JSXExpr::Expr(inner_expr) = &container.expr {
-                                return (**inner_expr).clone();
+                        if !element.children.is_empty() {
+                            if let JSXElementChild::JSXExprContainer(container) = &element.children[0] {
+                                if let JSXExpr::Expr(inner_expr) = &container.expr {
+                                    return (**inner_expr).clone();
+                                }
                             }
                         }
                     } else if ident.sym.as_ref() == SWITCH_PLACEHOLDER {
-                        if let Some(JSXElementChild::JSXExprContainer(container)) = element.children.first() {
-                            if let JSXExpr::Expr(inner_expr) = &container.expr {
-                                return self.unwrap_single_element_fragments((**inner_expr).clone());
+                        if !element.children.is_empty() {
+                            if let JSXElementChild::JSXExprContainer(container) = &element.children[0] {
+                                if let JSXExpr::Expr(inner_expr) = &container.expr {
+                                    return self.unwrap_single_element_fragments((**inner_expr).clone());
+                                }
                             }
                         }
                     }
@@ -542,12 +553,17 @@ impl Fold for PostTransformVisitor {
                         };
                         
                         if needs_inner_parens {
-                            let mut new_cond = cond_expr.clone();
-                            new_cond.cons = Box::new(Expr::Paren(ParenExpr {
-                                span: cond_expr.span,
-                                expr: cond_expr.cons.clone(),
-                            }));
-                            Expr::Cond(new_cond)
+                            if let Expr::Cond(mut new_cond) = inner {
+                                let span = new_cond.span;
+                                let cons = std::mem::take(&mut new_cond.cons);
+                                new_cond.cons = Box::new(Expr::Paren(ParenExpr {
+                                    span,
+                                    expr: cons,
+                                }));
+                                Expr::Cond(new_cond)
+                            } else {
+                                inner
+                            }
                         } else {
                             inner
                         }
