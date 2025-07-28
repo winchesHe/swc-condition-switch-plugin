@@ -1,6 +1,6 @@
 {
   "name": "swc-condition-switch-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "SWC plugin to transform Condition and Switch JSX elements into optimized conditional expressions",
   "main": "swc_condition_plugin.wasm",
   "types": "types/condition.d.ts",

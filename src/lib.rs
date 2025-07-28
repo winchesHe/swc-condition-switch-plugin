@@ -350,7 +350,7 @@ impl TransformVisitor {
             let non_whitespace_children = Self::filter_non_whitespace_children(else_children);
             
             if non_whitespace_children.len() == 1 {
-                let mut children = non_whitespace_children;
+                let children = non_whitespace_children;
                 let first_child = children.into_iter().next().unwrap();
                 if let JSXElementChild::JSXElement(element) = first_child {
                     match current_context {
