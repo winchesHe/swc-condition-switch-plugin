@@ -11,6 +11,7 @@ use serde::Deserialize;
 static CONDITION_TAG: &str = "Condition";
 static SWITCH_TAG: &str = "Switch";
 static IF_ATTR: &str = "if";
+static ELSE_ATTR: &str = "else";
 static SHORT_CIRCUIT_ATTR: &str = "shortCircuit";
 static BOOLEAN_FUNC: &str = "Boolean";
 static REACT_FRAGMENT: &str = "React.Fragment";
@@ -43,6 +44,7 @@ pub struct TransformVisitor {
     condition_atom: Atom,
     switch_atom: Atom,
     if_atom: Atom,
+    else_atom: Atom,
     short_circuit_atom: Atom,
 }
 
@@ -60,6 +62,7 @@ impl Default for TransformVisitor {
             condition_atom: CONDITION_TAG.into(),
             switch_atom: SWITCH_TAG.into(),
             if_atom: IF_ATTR.into(),
+            else_atom: ELSE_ATTR.into(),
             short_circuit_atom: SHORT_CIRCUIT_ATTR.into(),
         }
     }
@@ -167,6 +170,14 @@ impl TransformVisitor {
             }
         }
         None
+    }
+
+    fn has_else_attr(&self, attrs: &[JSXAttrOrSpread]) -> bool {
+        attrs.iter().any(|attr| {
+            matches!(attr, JSXAttrOrSpread::JSXAttr(jsx_attr) 
+                if matches!(&jsx_attr.name, JSXAttrName::Ident(name) 
+                    if name.sym == self.else_atom))
+        })
     }
 
     fn get_current_context(&self) -> &WrapperType {
@@ -298,20 +309,22 @@ impl TransformVisitor {
     }
 
     fn create_switch_transformation(&self, children: Vec<JSXElementChild>, short_circuit: bool, span: swc_core::common::Span) -> JSXElement {
-        let switch_cases: Vec<_> = children.into_iter()
-            .filter_map(|child| {
-                if let JSXElementChild::JSXElement(element) = child {
-                    if self.is_switch_case_element(&element) {
-                        if let Some(condition_expr) = self.extract_condition_from_attrs(&element.opening.attrs) {
-                            return Some((condition_expr, element.children));
-                        }
+        let mut switch_cases: Vec<_> = Vec::new();
+        let mut else_case: Option<Vec<JSXElementChild>> = None;
+
+        for child in children {
+            if let JSXElementChild::JSXElement(element) = child {
+                if self.is_switch_case_element(&element) {
+                    if let Some(condition_expr) = self.extract_condition_from_attrs(&element.opening.attrs) {
+                        switch_cases.push((condition_expr, element.children));
+                    } else if self.has_else_attr(&element.opening.attrs) {
+                        else_case = Some(element.children);
                     }
                 }
-                None
-            })
-            .collect();
+            }
+        }
 
-        if switch_cases.is_empty() {
+        if switch_cases.is_empty() && else_case.is_none() {
             return JSXElement {
                 span,
                 opening: JSXOpeningElement {
@@ -329,19 +342,183 @@ impl TransformVisitor {
             };
         }
 
+        // 如果只有 else case，直接返回 else case 的内容
+        if switch_cases.is_empty() && else_case.is_some() {
+            let else_children = else_case.unwrap();
+            let current_context = self.get_current_context();
+            
+            let non_whitespace_children = Self::filter_non_whitespace_children(else_children);
+            
+            if non_whitespace_children.len() == 1 {
+                let mut children = non_whitespace_children;
+                let first_child = children.into_iter().next().unwrap();
+                if let JSXElementChild::JSXElement(element) = first_child {
+                    match current_context {
+                        WrapperType::Return | WrapperType::Assignment => {
+                            return JSXElement {
+                                span,
+                                opening: JSXOpeningElement {
+                                    span,
+                                    name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
+                                    attrs: vec![],
+                                    self_closing: false,
+                                    type_args: None,
+                                },
+                                children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
+                                    span,
+                                    expr: JSXExpr::Expr(Box::new(Expr::JSXElement(element))),
+                                })],
+                                closing: Some(JSXClosingElement {
+                                    span,
+                                    name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
+                                }),
+                            };
+                        }
+                        WrapperType::Jsx => {
+                            return *element;
+                        }
+                    }
+                } else {
+                    // 不是单个JSX元素，使用fragment
+                    let fragment = JSXFragment {
+                        span,
+                        opening: JSXOpeningFragment { span },
+                        children: vec![first_child],
+                        closing: JSXClosingFragment { span },
+                    };
+                    
+                    match current_context {
+                        WrapperType::Return | WrapperType::Assignment => {
+                            return JSXElement {
+                                span,
+                                opening: JSXOpeningElement {
+                                    span,
+                                    name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
+                                    attrs: vec![],
+                                    self_closing: false,
+                                    type_args: None,
+                                },
+                                children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
+                                    span,
+                                    expr: JSXExpr::Expr(Box::new(Expr::JSXFragment(fragment))),
+                                })],
+                                closing: Some(JSXClosingElement {
+                                    span,
+                                    name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
+                                }),
+                            };
+                        }
+                        WrapperType::Jsx => {
+                            return JSXElement {
+                                span,
+                                opening: JSXOpeningElement {
+                                    span,
+                                    name: JSXElementName::Ident(self.react_fragment_ident.clone()),
+                                    attrs: vec![],
+                                    self_closing: false,
+                                    type_args: None,
+                                },
+                                children: fragment.children,
+                                closing: Some(JSXClosingElement {
+                                    span,
+                                    name: JSXElementName::Ident(self.react_fragment_ident.clone()),
+                                }),
+                            };
+                        }
+                    }
+                }
+            } else {
+                // 多个子元素，使用fragment
+                let fragment = JSXFragment {
+                    span,
+                    opening: JSXOpeningFragment { span },
+                    children: non_whitespace_children,
+                    closing: JSXClosingFragment { span },
+                };
+                
+                match current_context {
+                    WrapperType::Return | WrapperType::Assignment => {
+                        return JSXElement {
+                            span,
+                            opening: JSXOpeningElement {
+                                span,
+                                name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
+                                attrs: vec![],
+                                self_closing: false,
+                                type_args: None,
+                            },
+                            children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
+                                span,
+                                expr: JSXExpr::Expr(Box::new(Expr::JSXFragment(fragment))),
+                            })],
+                            closing: Some(JSXClosingElement {
+                                span,
+                                name: JSXElementName::Ident(self.condition_placeholder_ident.clone()),
+                            }),
+                        };
+                    }
+                    WrapperType::Jsx => {
+                        return JSXElement {
+                            span,
+                            opening: JSXOpeningElement {
+                                span,
+                                name: JSXElementName::Ident(self.react_fragment_ident.clone()),
+                                attrs: vec![],
+                                self_closing: false,
+                                type_args: None,
+                            },
+                            children: fragment.children,
+                            closing: Some(JSXClosingElement {
+                                span,
+                                name: JSXElementName::Ident(self.react_fragment_ident.clone()),
+                            }),
+                        };
+                    }
+                }
+            }
+        }
+
         let current_context = self.get_current_context();
+        // 只有在用户明确指定 shortCircuit 时才使用短路模式
+        // 或者在 return/assignment 上下文中只有一个 case 且没有 else 时
         let effective_short_circuit = short_circuit || 
-            (matches!(current_context, WrapperType::Return | WrapperType::Assignment) && switch_cases.len() == 1);
+            (matches!(current_context, WrapperType::Return | WrapperType::Assignment) && switch_cases.len() <= 1 && else_case.is_none());
         
         if effective_short_circuit {
-            self.create_short_circuit_switch(switch_cases, span)
+            self.create_short_circuit_switch(switch_cases, else_case, span)
         } else {
-            self.create_parallel_switch(switch_cases, span)
+            self.create_parallel_switch(switch_cases, else_case, span)
         }
     }
 
-    fn create_short_circuit_switch(&self, switch_cases: Vec<(Box<Expr>, Vec<JSXElementChild>)>, span: swc_core::common::Span) -> JSXElement {
-        let mut result_expr = Box::new(self.null_expr.clone());
+    fn create_short_circuit_switch(&self, switch_cases: Vec<(Box<Expr>, Vec<JSXElementChild>)>, else_case: Option<Vec<JSXElementChild>>, span: swc_core::common::Span) -> JSXElement {
+        let mut result_expr = if let Some(else_children) = else_case {
+            let non_whitespace_children = Self::filter_non_whitespace_children(else_children);
+            if non_whitespace_children.len() == 1 {
+                let first_child = non_whitespace_children.into_iter().next().unwrap();
+                if let JSXElementChild::JSXElement(element) = first_child {
+                    Box::new(Expr::JSXElement(element))
+                } else {
+                    let fragment = JSXFragment {
+                        span,
+                        opening: JSXOpeningFragment { span },
+                        children: vec![first_child],
+                        closing: JSXClosingFragment { span },
+                    };
+                    Box::new(Expr::JSXFragment(fragment))
+                }
+            } else {
+                let fragment = JSXFragment {
+                    span,
+                    opening: JSXOpeningFragment { span },
+                    children: non_whitespace_children,
+                    closing: JSXClosingFragment { span },
+                };
+                Box::new(Expr::JSXFragment(fragment))
+            }
+        } else {
+            Box::new(self.null_expr.clone())
+        };
         let current_context = self.get_current_context();
         
         for (condition, children) in switch_cases.into_iter().rev() {
@@ -438,11 +615,17 @@ impl TransformVisitor {
         }
     }
 
-    fn create_parallel_switch(&self, switch_cases: Vec<(Box<Expr>, Vec<JSXElementChild>)>, span: swc_core::common::Span) -> JSXElement {
+    fn create_parallel_switch(&self, switch_cases: Vec<(Box<Expr>, Vec<JSXElementChild>)>, else_case: Option<Vec<JSXElementChild>>, span: swc_core::common::Span) -> JSXElement {
         // 预先分配，避免 push 时多次扩容
-        let mut result_children = Vec::with_capacity(switch_cases.len());
+        let mut result_children = Vec::with_capacity(switch_cases.len() + if else_case.is_some() { 1 } else { 0 });
+
+        // 收集所有条件表达式用于 else case
+        let mut all_conditions: Vec<Box<Expr>> = Vec::new();
 
         for (condition, children) in switch_cases {
+            // 克隆条件用于后续 else case 的计算
+            all_conditions.push(condition.clone());
+
             let fragment = JSXFragment {
                 span,
                 opening: JSXOpeningFragment { span },
@@ -460,6 +643,58 @@ impl TransformVisitor {
             result_children.push(JSXElementChild::JSXExprContainer(JSXExprContainer {
                 span,
                 expr: JSXExpr::Expr(Box::new(conditional_expr)),
+            }));
+        }
+
+        // 在非短路模式下，else case 只在所有条件都不满足时显示
+        if let Some(else_children) = else_case {
+            let fragment_expr = JSXFragment {
+                span,
+                opening: JSXOpeningFragment { span },
+                children: else_children,
+                closing: JSXClosingFragment { span },
+            };
+
+            // 创建 !condition1 && !condition2 && ... 的表达式
+            let else_condition = if all_conditions.is_empty() {
+                // 如果没有其他条件，else 总是显示
+                Box::new(Expr::Lit(Lit::Bool(Bool { span, value: true })))
+            } else {
+                // 创建所有条件的否定的逻辑与
+                let mut combined_condition = Box::new(Expr::Unary(UnaryExpr {
+                    span,
+                    op: UnaryOp::Bang,
+                    arg: all_conditions[0].clone(),
+                }));
+
+                for condition in all_conditions.into_iter().skip(1) {
+                    let negated_condition = Box::new(Expr::Unary(UnaryExpr {
+                        span,
+                        op: UnaryOp::Bang,
+                        arg: condition,
+                    }));
+
+                    combined_condition = Box::new(Expr::Bin(BinExpr {
+                        span,
+                        left: combined_condition,
+                        op: BinaryOp::LogicalAnd,
+                        right: negated_condition,
+                    }));
+                }
+
+                combined_condition
+            };
+
+            let else_conditional_expr = Expr::Cond(CondExpr {
+                span,
+                test: else_condition,
+                cons: Box::new(Expr::JSXFragment(fragment_expr)),
+                alt: Box::new(self.null_expr.clone()),
+            });
+
+            result_children.push(JSXElementChild::JSXExprContainer(JSXExprContainer {
+                span,
+                expr: JSXExpr::Expr(Box::new(else_conditional_expr)),
             }));
         }
 

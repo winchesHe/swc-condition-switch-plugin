@@ -368,6 +368,461 @@ fn test_no_condition_tags() {
     test_transform(input, expected);
 }
 
+#[test]
+fn test_switch_nested_in_jsx_structure() {
+    let input = r#"
+    function App({ condition }) {
+      return (
+        <div>
+          <header>Header</header>
+          <Switch>
+            <Switch.Case if={condition}>
+              <div>
+                <span>Nested content</span>
+                <Switch>
+                  <Switch.Case if={true}>
+                    <p>Deeply nested</p>
+                  </Switch.Case>
+                </Switch>
+              </div>
+            </Switch.Case>
+          </Switch>
+        </div>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition }) {
+      return (
+        <div>
+          <header>Header</header>
+          <React.Fragment>{condition ? <><div>
+                <span>Nested content</span>
+                <Switch>
+                  <Switch.Case if={true}>
+                    <p>Deeply nested</p>
+                  </Switch.Case>
+                </Switch>
+              </div></> : null}</React.Fragment>
+        </div>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_with_condition_mixed() {
+    let input = r#"
+    function App({ user, admin }) {
+      return (
+        <Switch>
+          <Switch.Case if={admin}>
+            <Condition if={user.permissions}>
+              <AdminPanel />
+            </Condition>
+          </Switch.Case>
+          <Switch.Case if={user}>
+            <UserPanel />
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ user, admin }) {
+      return (
+        <React.Fragment>
+          {admin ? <><Condition if={user.permissions}>
+              <AdminPanel/>
+            </Condition></> : null}
+          {user ? <><UserPanel/></> : null}
+        </React.Fragment>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_case_with_function_expressions() {
+    let input = r#"
+    function App({ items }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={items.some(item => item.active)}>
+            <div>Has active items</div>
+          </Switch.Case>
+          <Switch.Case if={items.every(item => !item.active)}>
+            <div>No active items</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ items }) {
+      return items.some((item)=>item.active) ? <div>Has active items</div> : items.every((item)=>!item.active) ? <div>No active items</div> : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_in_array_map() {
+    let input = r#"
+    function App({ users }) {
+      return (
+        <div>
+          {users.map(user => (
+            <Switch key={user.id}>
+              <Switch.Case if={user.isAdmin}>
+                <AdminBadge user={user} />
+              </Switch.Case>
+              <Switch.Case if={user.isPremium}>
+                <PremiumBadge user={user} />
+              </Switch.Case>
+            </Switch>
+          ))}
+        </div>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ users }) {
+      return (
+        <div>
+          {users.map((user)=>(
+            <React.Fragment>
+              {user.isAdmin ? <><AdminBadge user={user}/></> : null}
+              {user.isPremium ? <><PremiumBadge user={user}/></> : null}
+            </React.Fragment>
+          ))}
+        </div>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_case_with_complex_ternary_conditions() {
+    let input = r#"
+    function App({ status, priority }) {
+      return (
+        <Switch>
+          <Switch.Case if={status === 'urgent' ? priority > 5 : priority > 8}>
+            <HighPriorityAlert />
+          </Switch.Case>
+          <Switch.Case if={status === 'normal'}>
+            <NormalAlert />
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ status, priority }) {
+      return (
+        <React.Fragment>
+          {status === 'urgent' ? priority > 5 : priority > 8 ? <><HighPriorityAlert/></> : null}
+          {status === 'normal' ? <><NormalAlert/></> : null}
+        </React.Fragment>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_with_empty_case() {
+    let input = r#"
+    function App({ show }) {
+      return (
+        <Switch>
+          <Switch.Case if={show}>
+            
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ show }) {
+      return show ? (<></>) : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_multiple_cases_with_complex_jsx() {
+    let input = r#"
+    function App({ role, permissions, isActive }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={role === 'admin' && permissions.includes('write')}>
+            <div className="admin-panel">
+              <h2>Admin Panel</h2>
+              <button>Manage Users</button>
+            </div>
+          </Switch.Case>
+          <Switch.Case if={role === 'user' && isActive}>
+            <div className="user-panel">
+              <p>Welcome User</p>
+              {permissions.map(perm => <span key={perm}>{perm}</span>)}
+            </div>
+          </Switch.Case>
+          <Switch.Case if={!isActive}>
+            <div className="inactive">Account Inactive</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ role, permissions, isActive }) {
+      return role === 'admin' && permissions.includes('write') ? (
+        <div className="admin-panel">
+          <h2>Admin Panel</h2>
+          <button>Manage Users</button>
+        </div>
+      ) : role === 'user' && isActive ? <div className="user-panel">
+          <p>Welcome User</p>
+          {permissions.map((perm)=><span key={perm}>{perm}</span>)}
+        </div> : !isActive ? <div className="inactive">Account Inactive</div> : null
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_with_else_short_circuit() {
+    let input = r#"
+    function App({ condition }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={condition}>
+            <div>If case</div>
+          </Switch.Case>
+          <Switch.Case else>
+            <div>Else case</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition }) {
+      return condition ? <div>If case</div> : <div>Else case</div>
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_with_else_non_short_circuit() {
+    let input = r#"
+    function App({ condition1, condition2 }) {
+      return (
+        <Switch>
+          <Switch.Case if={condition1}>
+            <div>Case 1</div>
+          </Switch.Case>
+          <Switch.Case if={condition2}>
+            <div>Case 2</div>
+          </Switch.Case>
+          <Switch.Case else>
+            <div>Else case</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition1, condition2 }) {
+      return (
+        <React.Fragment>
+          {condition1 ? <><div>Case 1</div></> : null}
+          {condition2 ? <><div>Case 2</div></> : null}
+          {!condition1 && !condition2 ? <><div>Else case</div></> : null}
+        </React.Fragment>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_multiple_cases_with_else_short_circuit() {
+    let input = r#"
+    function App({ user, admin, guest }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={admin}>
+            <AdminPanel />
+          </Switch.Case>
+          <Switch.Case if={user}>
+            <UserPanel />
+          </Switch.Case>
+          <Switch.Case if={guest}>
+            <GuestPanel />
+          </Switch.Case>
+          <Switch.Case else>
+            <DefaultPanel />
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ user, admin, guest }) {
+      return admin ? <AdminPanel/> : user ? <UserPanel/> : guest ? <GuestPanel/> : <DefaultPanel/>
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_only_else_case() {
+    let input = r#"
+    function App() {
+      return (
+        <Switch>
+          <Switch.Case else>
+            <div>Only else</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App() {
+      return (<div>Only else</div>)
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_assignment_with_else() {
+    let input = r#"
+    function App({ condition }) {
+      const element = <Switch shortCircuit>
+        <Switch.Case if={condition}>
+          <span>Conditional</span>
+        </Switch.Case>
+        <Switch.Case else>
+          <span>Default</span>
+        </Switch.Case>
+      </Switch>
+      return element
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition }) {
+      const element = condition ? <span>Conditional</span> : <span>Default</span>
+      return element
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_else_with_complex_jsx() {
+    let input = r#"
+    function App({ isLoggedIn }) {
+      return (
+        <Switch shortCircuit>
+          <Switch.Case if={isLoggedIn}>
+            <div>
+              <h1>Welcome</h1>
+              <p>You are logged in</p>
+            </div>
+          </Switch.Case>
+          <Switch.Case else>
+            <div>
+              <h1>Please Login</h1>
+              <button>Login</button>
+            </div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ isLoggedIn }) {
+      return isLoggedIn ? (
+        <div>
+          <h1>Welcome</h1>
+          <p>You are logged in</p>
+        </div>
+      ) : <div>
+          <h1>Please Login</h1>
+          <button>Login</button>
+        </div>
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
+#[test]
+fn test_switch_single_if_with_else_non_short_circuit() {
+    let input = r#"
+    function App({ condition }) {
+      return (
+        <Switch>
+          <Switch.Case if={condition}>
+            <div>If case</div>
+          </Switch.Case>
+          <Switch.Case else>
+            <div>Else case</div>
+          </Switch.Case>
+        </Switch>
+      )
+    }
+    "#;
+
+    let expected = r#"
+    function App({ condition }) {
+      return (
+        <React.Fragment>
+          {condition ? <><div>If case</div></> : null}
+          {!condition ? <><div>Else case</div></> : null}
+        </React.Fragment>
+      )
+    }
+    "#;
+
+    test_transform(input, expected);
+}
+
 fn test_transform(input: &str, expected: &str) {
     let syntax = Syntax::Typescript(TsSyntax {
         tsx: true,
